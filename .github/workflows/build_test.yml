@@ -123,10 +123,10 @@ jobs:
         os:
          - image_name: ubuntu-latest
            download_name: manylinux_x86_64
-         - image_name: macos-latest
-           download_name: macosx_x86_64
-         - image_name: windows-2019
-           download_name: win_amd64
+#         - image_name: macos-latest
+#           download_name: macosx_x86_64
+#         - image_name: windows-2019
+#           download_name: win_amd64
 #        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
         python-version: ["3.11"]
 #        cloud-provider: [aws, azure, gcp]
@@ -149,13 +149,13 @@ jobs:
           IMAGE_NAME=localstack/snowflake DEBUG=1 localstack start -d
           localstack wait
 
-      - name: Setup parameters file
-        shell: bash
-        env:
-          PARAMETERS_SECRET: ${{ secrets.PARAMETERS_SECRET }}
-        run: |
-          gpg --quiet --batch --yes --decrypt --passphrase="$PARAMETERS_SECRET" \
-          .github/workflows/parameters/public/parameters_${{ matrix.cloud-provider }}.py.gpg > test/parameters.py
+#      - name: Setup parameters file
+#        shell: bash
+#        env:
+#          PARAMETERS_SECRET: ${{ secrets.PARAMETERS_SECRET }}
+#        run: |
+#          gpg --quiet --batch --yes --decrypt --passphrase="$PARAMETERS_SECRET" \
+#          .github/workflows/parameters/public/parameters_${{ matrix.cloud-provider }}.py.gpg > test/parameters.py
       - name: Download wheel(s)
         uses: actions/download-artifact@v4
         with:

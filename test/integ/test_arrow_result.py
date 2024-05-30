@@ -937,6 +937,7 @@ def test_select_date(conn_cnx):
     finish(conn_cnx, table)
 
 
+@pytest.mark.skip(reason="LocalStack - currently incompatible with Snowflake emulator")
 @pytest.mark.parametrize("scale", range(10))
 @pytest.mark.parametrize("type", ["timestampntz", "timestampltz", "timestamptz"])
 def test_select_timestamp_with_scale(conn_cnx, scale, type):
