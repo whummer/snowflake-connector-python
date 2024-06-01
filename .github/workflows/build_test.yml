@@ -191,6 +191,7 @@ jobs:
 
       - name: Print LocalStack logs
         run: localstack logs
+        if: ${{ success() || failure() }}
 
 #  test-olddriver:
 #    name: Old Driver Test ${{ matrix.os.download_name }}-${{ matrix.python-version }}-${{ matrix.cloud-provider }}
