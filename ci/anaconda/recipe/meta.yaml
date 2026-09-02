@@ -1,6 +1,7 @@
 {% set name = "snowflake-connector-python" %}
 {% set version = os.environ.get('SNOWFLAKE_CONNECTOR_PYTHON_VERSION', 0) %}
 {% set build_number = os.environ.get('PUBLIC_CONNECTOR_BUILD_NUMBER', 0) %}
+{% set freethreading = os.environ.get('FREETHREADING', '0') == '1' %}
 
 package:
   name: {{ name|lower }}
@@ -11,12 +12,16 @@ source:
 
 build:
   number: {{ build_number }}
-  string: "py{{ py }}_{{ build_number }}"
+  string: "py{{ py }}{% if freethreading %}t{% endif %}_{{ build_number }}"
+  {% if freethreading %}
+  track_features:
+    - py_freethreading
+  {% endif %}
   script:
     - export SF_NO_COPY_ARROW_LIB=1              # [unix]
     - export SF_ARROW_LIBDIR="${PREFIX}/lib"     # [unix]
     - export ENABLE_EXT_MODULES=true             # [unix]
-    - {{ PYTHON }} -m pip install . --no-use-pep517 --no-deps -vvv
+    - {{ PYTHON }} -m pip install . --no-build-isolation --no-deps -vvv
   entry_points:
     - snowflake-dump-ocsp-response = snowflake.connector.tool.dump_ocsp_response:main
     - snowflake-dump-ocsp-response-cache = snowflake.connector.tool.dump_ocsp_response_cache:main
@@ -35,13 +40,12 @@ requirements:
     - setuptools >=40.6.0
     - wheel
     - cython
-    # The way nano arrow builds relies on no-use-pep517, but that flag is fully dropped starting pip 25.3
-    - pip <25.3
     - python {{ python }}
+    {% if freethreading %}
+    - python_abi {{ python }}.* *_cp{{ py }}t
+    {% endif %}
   run:
-    {% if py == 39 %}
-    - python >=3.9,<3.10.0a0
-    {% elif py == 310 %}
+    {% if py == 310 %}
     - python >=3.10,<3.11.0a0
     {% elif py == 311 %}
     - python >=3.11,<3.12.0a0
@@ -49,19 +53,23 @@ requirements:
     - python >=3.12,<3.13.0a0
     {% elif py == 313 %}
     - python >=3.13,<3.14.0a0
+    {% elif py == 314 %}
+    - python >=3.14,<3.15.0a0
     {% else %}
     - python
     {% endif %}
+    {% if freethreading %}
+    - python_abi {{ python }}.* *_cp{{ py }}t
+    {% endif %}
     - asn1crypto >0.24.0,<2.0.0
-    - cryptography >=44.0.1
-    - pyOpenSSL >=24.0.0,<26.0.0
+    - cryptography >=46.0.5
+    - pyOpenSSL >=24.0.0
     - pyjwt >=2.10.1,<3.0.0
     - pytz
     - requests >=2.32.4,<3.0.0
     - packaging
     - charset-normalizer >=2,<4
     - idna >=3.7,<4
-    - urllib3 >=1.26.5,<2.0.0  # [py<310]
     - certifi >=2024.7.4
     - typing_extensions >=4.3,<5
     - filelock >=3.5,<4

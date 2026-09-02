@@ -15,7 +15,7 @@ using the Snowflake JDBC or ODBC drivers.
 
 The connector has **no** dependencies on JDBC or ODBC.
 It can be installed using ``pip`` on Linux, Mac OSX, and Windows platforms
-where Python 3.9.0 (or higher) is installed.
+where Python 3.10.0 (or higher) is installed.
 
 Snowflake Documentation is available at:
 https://docs.snowflake.com/
@@ -42,7 +42,7 @@ Find the `snowflake_connector_python*.whl` package in the `./dist` directory.
 ### In Docker
 Or use our Dockerized build script `ci/build_docker.sh` and find the built wheel files in `dist/repaired_wheels`.
 
-Note: `ci/build_docker.sh` can be used to compile only certain versions, like this: `ci/build_docker.sh "3.9 3.10"`
+Note: `ci/build_docker.sh` can be used to compile only certain versions, like this: `ci/build_docker.sh "3.10 3.11"`
 
 ## Code hygiene and other utilities
 These tools are integrated into `tox` to allow us to easily set them up universally on any computer.
@@ -103,6 +103,8 @@ To ensure the authenticity and integrity of the Python package, follow the steps
   Verified OK
   ````
 
-## NOTE
+## Notes
 
 This library currently does not support GCP regional endpoints.  Please ensure that any workloads using through this library do not require support for regional endpoints on GCP.  If you have questions about this, please contact [Snowflake Support](https://community.snowflake.com/s/article/How-To-Submit-a-Support-Case-in-Snowflake-Lodge).
+
+The driver uses Rust library called sf_mini_core, you can find its source code [here](https://github.com/snowflakedb/universal-driver/tree/main/sf_mini_core)

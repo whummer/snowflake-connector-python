@@ -247,6 +247,15 @@ std::shared_ptr<sf::IColumnConverter> getConverterFromSchema(
             returnCode);
         scale =
             std::stoi(std::string(scaleString.data, scaleString.size_bytes));
+        if (scale < 0 || scale > 9) {
+          std::string errorInfo = Logger::formatString(
+              "[Snowflake Exception] invalid scale value %d for TIME column "
+              "(expected 0-9)",
+              scale);
+          logger->error(__FILE__, __func__, __LINE__, errorInfo.c_str());
+          PyErr_SetString(PyExc_ValueError, errorInfo.c_str());
+          return nullptr;
+        }
       }
       switch (schemaView.type) {
         case NANOARROW_TYPE_INT32:
@@ -281,6 +290,15 @@ std::shared_ptr<sf::IColumnConverter> getConverterFromSchema(
             returnCode);
         scale =
             std::stoi(std::string(scaleString.data, scaleString.size_bytes));
+        if (scale < 0 || scale > 9) {
+          std::string errorInfo = Logger::formatString(
+              "[Snowflake Exception] invalid scale value %d for TIMESTAMP_NTZ "
+              "column (expected 0-9)",
+              scale);
+          logger->error(__FILE__, __func__, __LINE__, errorInfo.c_str());
+          PyErr_SetString(PyExc_ValueError, errorInfo.c_str());
+          return nullptr;
+        }
       }
       switch (schemaView.type) {
         case NANOARROW_TYPE_INT64: {
@@ -333,6 +351,15 @@ std::shared_ptr<sf::IColumnConverter> getConverterFromSchema(
             returnCode);
         scale =
             std::stoi(std::string(scaleString.data, scaleString.size_bytes));
+        if (scale < 0 || scale > 9) {
+          std::string errorInfo = Logger::formatString(
+              "[Snowflake Exception] invalid scale value %d for TIMESTAMP_LTZ "
+              "column (expected 0-9)",
+              scale);
+          logger->error(__FILE__, __func__, __LINE__, errorInfo.c_str());
+          PyErr_SetString(PyExc_ValueError, errorInfo.c_str());
+          return nullptr;
+        }
       }
       switch (schemaView.type) {
         case NANOARROW_TYPE_INT64: {
@@ -382,6 +409,15 @@ std::shared_ptr<sf::IColumnConverter> getConverterFromSchema(
             returnCode);
         scale =
             std::stoi(std::string(scaleString.data, scaleString.size_bytes));
+        if (scale < 0 || scale > 9) {
+          std::string errorInfo = Logger::formatString(
+              "[Snowflake Exception] invalid scale value %d for TIMESTAMP_TZ "
+              "column (expected 0-9)",
+              scale);
+          logger->error(__FILE__, __func__, __LINE__, errorInfo.c_str());
+          PyErr_SetString(PyExc_ValueError, errorInfo.c_str());
+          return nullptr;
+        }
 
         // Byte Length may be unset if TIMESTAMP_TZ is the child of a structured
         // type In this case rely on the default value.
@@ -481,8 +517,21 @@ std::shared_ptr<sf::IColumnConverter> getConverterFromSchema(
     }
 
     case SnowflakeType::Type::INTERVAL_YEAR_MONTH: {
+      struct ArrowStringView scaleString = ArrowCharView(nullptr);
+      int scale = 9;
+      if (metadata != nullptr) {
+        returnCode = ArrowMetadataGetValue(metadata, ArrowCharView("scale"),
+                                           &scaleString);
+        SF_CHECK_ARROW_RC_AND_RETURN(
+            returnCode, nullptr,
+            "[Snowflake Exception] error getting 'scale' from "
+            "Arrow metadata, error code: %d",
+            returnCode);
+        scale =
+            std::stoi(std::string(scaleString.data, scaleString.size_bytes));
+      }
       converter = std::make_shared<sf::IntervalYearMonthConverter>(
-          array, context, useNumpy);
+          array, context, useNumpy, scale);
       break;
     }
 

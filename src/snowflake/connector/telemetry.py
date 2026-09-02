@@ -41,8 +41,14 @@ class TelemetryField(Enum):
     IMPORTED_PACKAGES = "client_imported_packages"
     # Core import
     CORE_IMPORT = "mini_core_import"
+    NANOARROW_IMPORT = "nanoarrow_import"
     # multi-statement usage
     MULTI_STATEMENT = "client_multi_statement_query"
+    # Connection-identifier shape (see connection_identifier_shape.py).
+    # TODO(SNOW-3548350): remove this event type and the five KEY_*_PROVIDED /
+    # KEY_ACCOUNT_WITH_REGION keys below together with the emission
+    # (target: 2026-11-30).
+    CONNECTION_IDENTIFIER_SHAPE = "client_connection_identifier_shape"
     # Keys for telemetry data sent through either in-band or out-of-band telemetry
     KEY_TYPE = "type"
     KEY_SOURCE = "source"
@@ -53,6 +59,17 @@ class TelemetryField(Enum):
     KEY_REASON = "reason"
     KEY_VALUE = "value"
     KEY_EXCEPTION = "exception"
+    # Payload keys for the client_connection_identifier_shape event. Values
+    # are stringified booleans ("true" / "false") to match the existing
+    # in-band telemetry style used by sibling drivers (Go / JDBC). See the
+    # docstring on ConnectionIdentifierShape for the semantic meaning.
+    # TODO(SNOW-3548350): remove together with CONNECTION_IDENTIFIER_SHAPE
+    # above (target: 2026-11-30).
+    KEY_ACCOUNT_PROVIDED = "account_provided"
+    KEY_ACCOUNT_WITH_REGION = "account_with_region"
+    KEY_ACCOUNT_ORG_PROVIDED = "account_org_provided"
+    KEY_REGION_PROVIDED = "region_provided"
+    KEY_HOST_PROVIDED = "host_provided"
     # Reserved UpperCamelName keys
     KEY_ERROR_NUMBER = "ErrorNumber"
     KEY_ERROR_MESSAGE = "ErrorMessage"

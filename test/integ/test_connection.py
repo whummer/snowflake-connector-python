@@ -6,6 +6,7 @@ import logging
 import os
 import pathlib
 import queue
+import socket
 import stat
 import tempfile
 import threading
@@ -433,13 +434,16 @@ def test_invalid_account_timeout(conn_cnx):
 def test_invalid_proxy(conn_cnx):
     http_proxy = os.environ.get("HTTP_PROXY")
     https_proxy = os.environ.get("HTTPS_PROXY")
+    with socket.socket() as _s:
+        _s.bind(("localhost", 0))
+        proxy_port = str(_s.getsockname()[1])
     with pytest.raises(OperationalError):
         with conn_cnx(
             protocol="http",
             account="testaccount",
             login_timeout=5,
             proxy_host="localhost",
-            proxy_port="3333",
+            proxy_port=proxy_port,
         ):
             pass
     # NOTE environment variable is set ONLY FOR THE OLD DRIVER if the proxy parameter is specified.
@@ -465,13 +469,16 @@ def test_invalid_proxy(conn_cnx):
 def test_invalid_proxy_not_impacting_env_vars(conn_cnx):
     http_proxy = os.environ.get("HTTP_PROXY")
     https_proxy = os.environ.get("HTTPS_PROXY")
+    with socket.socket() as _s:
+        _s.bind(("localhost", 0))
+        proxy_port = str(_s.getsockname()[1])
     with pytest.raises(OperationalError):
         with conn_cnx(
             protocol="http",
             account="testaccount",
             login_timeout=5,
             proxy_host="localhost",
-            proxy_port="3333",
+            proxy_port=proxy_port,
         ):
             pass
     # Proxy environment variables should not change
@@ -1280,6 +1287,88 @@ def test_disable_query_context_cache(conn_cnx) -> None:
         assert conn.query_context_cache is None
 
 
+@pytest.mark.aws
+@pytest.mark.skipolddriver
+def test_qcc_tracks_multi_database_hybrid_tables(conn_cnx) -> None:
+    """Verify QCC grows as queries touch hybrid tables in different databases.
+
+    Each database contributes an additional entry to the QCC.  The test
+    mirrors the standard multi-database QCC integration test present in the
+    Go and Node.js drivers.
+
+    Steps:
+      1. Create 3 databases, each with a hybrid table of the same name.
+      2. Insert identical rows into each table via USE DATABASE + unqualified name.
+      3. After each database, assert QCC size grew (2 → 3 → 4).
+      4. Run cross-DB selects to confirm data correctness; QCC stays at 4.
+    """
+    suffix = random_string(5)
+    db_names = [f"qcc_test_db_{suffix}_{i}" for i in range(1, 4)]
+    table_name = f"ht_{random_string(8)}"
+
+    with conn_cnx() as conn:
+        cur = conn.cursor()
+        # Remember the original database so we can restore it in cleanup.
+        cur.execute("SELECT CURRENT_DATABASE()")
+        original_db = cur.fetchone()[0]
+
+        try:
+            # Pre-create all databases
+            for db in db_names:
+                cur.execute(f"CREATE DATABASE IF NOT EXISTS {db}")
+
+            # Phase 1: create tables and insert data, verify QCC growth
+            for db, expected_qcc_size in zip(db_names, [2, 3, 4]):
+                cur.execute(f"USE DATABASE {db}")
+                cur.execute(
+                    f"CREATE OR REPLACE HYBRID TABLE {table_name} "
+                    f"(a INT PRIMARY KEY, b INT)"
+                )
+                cur.execute(f"INSERT INTO {table_name} VALUES (1, 2), (2, 3), (3, 4)")
+
+                # Verify data was inserted into the correct database
+                cur.execute(f"SELECT * FROM {table_name} ORDER BY a")
+                rows = cur.fetchall()
+                assert rows == [
+                    (1, 2),
+                    (2, 3),
+                    (3, 4),
+                ], f"Data mismatch in {db}: {rows}"
+
+                actual = len(conn.query_context_cache)
+                assert actual == expected_qcc_size, (
+                    f"After operations on {db}: "
+                    f"expected QCC size {expected_qcc_size}, got {actual}"
+                )
+
+            # Phase 2: cross-DB selects — verify data correctness and
+            # QCC stays at 4
+            cur.execute(
+                f"SELECT * FROM {db_names[0]}.public.{table_name} x, "
+                f"{db_names[1]}.public.{table_name} y, "
+                f"{db_names[2]}.public.{table_name} z "
+                f"WHERE x.a = y.a AND y.a = z.a"
+            )
+            rows = cur.fetchall()
+            assert len(rows) == 3, f"Expected 3 rows from 3-way join, got {len(rows)}"
+
+            cur.execute(
+                f"SELECT * FROM {db_names[0]}.public.{table_name} x, "
+                f"{db_names[1]}.public.{table_name} y "
+                f"WHERE x.a = y.a"
+            )
+            rows = cur.fetchall()
+            assert len(rows) == 3, f"Expected 3 rows from 2-way join, got {len(rows)}"
+
+            assert (
+                len(conn.query_context_cache) == 4
+            ), "QCC should remain at 4 after cross-DB selects"
+        finally:
+            cur.execute(f"USE DATABASE {original_db}")
+            for db in db_names:
+                cur.execute(f"DROP DATABASE IF EXISTS {db}")
+
+
 @pytest.mark.skipolddriver
 @pytest.mark.parametrize("mode", ("file", "env"))
 @pytest.mark.parametrize("connection_name", ["default", "custom_connection_for_test"])
@@ -1787,8 +1876,10 @@ def test_disable_telemetry(conn_cnx, caplog):
             with conn.cursor() as cur:
                 cur.execute("select 1").fetchall()
             assert (
-                len(conn._telemetry._log_batch) == 4
-            )  # 4 events are import package, minicore import, fetch first, fetch last
+                len(conn._telemetry._log_batch) == 6
+            )  # 6 events: import package, nanoarrow import, minicore import,
+            # client_connection_identifier_shape (SNOW-3548350; remove with
+            # the emission, target 2026-11-30), fetch first, fetch last
     assert "POST /telemetry/send" in caplog.text
     caplog.clear()
 
@@ -1811,7 +1902,10 @@ def test_disable_telemetry(conn_cnx, caplog):
     # test disable telemetry in the client
     with caplog.at_level(logging.DEBUG):
         with conn_cnx() as conn:
-            assert conn.telemetry_enabled and len(conn._telemetry._log_batch) == 2
+            # Bumped from 3 to 4 by SNOW-3351450 (one extra event:
+            # client_connection_identifier_shape). Revert to 3 with the
+            # emission removal (SNOW-3548350, target 2026-11-30).
+            assert conn.telemetry_enabled and len(conn._telemetry._log_batch) == 4
             conn.telemetry_enabled = False
             with conn.cursor() as cur:
                 cur.execute("select 1").fetchall()
@@ -2598,3 +2692,113 @@ def test_empty_result_stats(conn_cnx):
                     num_dml_duplicates=None,
                 ),
             )
+
+
+def test_fqn_ddl_does_not_pollute_schema_cache(conn_cnx, db_parameters):
+    """SNOW-3665226: a fully-qualified DDL must not populate the connector's
+    cached _schema/_database when the session has none set (finalSchemaName/
+    finalDatabaseName reflect the referenced object, not the session context).
+    """
+    database = db_parameters["database"].upper()
+    schema = db_parameters["schema"].upper()
+    view_name = f'"{database}"."{schema}"."SNOW_3665226_REPRO_VIEW"'
+
+    # Open a session with NO schema so the cache starts as None.
+    with conn_cnx(schema=None) as cnx:
+        with cnx.cursor() as cur:
+            # Sanity-check: cache and server agree before the test.
+            assert cnx._schema is None
+            db_before = cnx._database
+            assert db_before is not None  # database was set at connect time
+            server_schema_before = cur.execute("SELECT CURRENT_SCHEMA()").fetchone()[0]
+            assert server_schema_before is None
+
+            # Touch a fully-qualified object — this must not change the session context.
+            try:
+                cur.execute(f"CREATE OR REPLACE TEMP VIEW {view_name} AS SELECT 1 AS x")
+            finally:
+                cur.execute(f"DROP VIEW IF EXISTS {view_name}")
+
+            # Cache must still be None / unchanged — the session context never changed.
+            assert cnx._schema is None, (
+                f"connector cache was polluted: _schema={cnx._schema!r}, "
+                "but no USE SCHEMA was issued"
+            )
+            assert cnx._database == db_before, (
+                f"connector _database was polluted: got {cnx._database!r}, "
+                f"expected {db_before!r}"
+            )
+
+            # Server must also still return NULL for CURRENT_SCHEMA().
+            server_schema_after = cur.execute("SELECT CURRENT_SCHEMA()").fetchone()[0]
+            assert (
+                server_schema_after is None
+            ), f"unexpected server schema: {server_schema_after!r}"
+
+
+def test_fqn_ddl_does_not_pollute_schema_cache_with_active_context(
+    conn_cnx, db_parameters
+):
+    """SNOW-3665226: fully-qualified DDL must not mutate the connector's cached
+    current schema / database when the session *does* have an active schema set.
+
+    Repro variant: connect with an explicit database+schema context, then execute
+    a DDL referencing a fully-qualified object in a *different* schema.  Before
+    the fix the connector would overwrite _schema/_database with the object's
+    schema, causing get_current_schema() to diverge from CURRENT_SCHEMA().
+    """
+    unique = random_string(5).lower()
+    database = db_parameters["database"].upper()
+    session_schema = f"SNOW_3665226_SESSION_{unique}".upper()
+    other_schema = f"SNOW_3665226_OTHER_{unique}".upper()
+
+    # Use a separate bootstrap connection to create two schemas in the existing
+    # test database (avoids needing CREATE DATABASE privilege).
+    with conn_cnx() as bootstrap_cnx:
+        with bootstrap_cnx.cursor() as cur:
+            cur.execute(f"CREATE SCHEMA IF NOT EXISTS {session_schema}")
+            cur.execute(f"CREATE SCHEMA IF NOT EXISTS {other_schema}")
+
+    try:
+        # Connect with the known db+schema as the session context.
+        with conn_cnx(database=database, schema=session_schema) as cnx:
+            with cnx.cursor() as cur:
+                # Sanity-check: cache and server agree before the DDL.
+                assert cnx._database.upper() == database
+                assert cnx._schema.upper() == session_schema
+                server_schema_before = cur.execute(
+                    "SELECT CURRENT_SCHEMA()"
+                ).fetchone()[0]
+                assert server_schema_before.upper() == session_schema
+
+                # Execute DDL targeting a *different* schema (fully-qualified).
+                view_fqn = f'"{database}"."{other_schema}"."SNOW_3665226_VIEW_{unique}"'
+                try:
+                    cur.execute(
+                        f"CREATE OR REPLACE TEMP VIEW {view_fqn} AS SELECT 1 AS x"
+                    )
+                finally:
+                    cur.execute(f"DROP VIEW IF EXISTS {view_fqn}")
+
+                # The connector cache must still reflect the original session context.
+                assert cnx._schema.upper() == session_schema, (
+                    f"connector _schema was polluted: got {cnx._schema!r}, "
+                    f"expected {session_schema!r}"
+                )
+                assert cnx._database.upper() == database, (
+                    f"connector _database was polluted: got {cnx._database!r}, "
+                    f"expected {database!r}"
+                )
+
+                # Server must also still report the original schema.
+                server_schema_after = cur.execute("SELECT CURRENT_SCHEMA()").fetchone()[
+                    0
+                ]
+                assert (
+                    server_schema_after.upper() == session_schema
+                ), f"unexpected server schema: {server_schema_after!r}"
+    finally:
+        with conn_cnx() as cleanup_cnx:
+            with cleanup_cnx.cursor() as cur:
+                cur.execute(f"DROP SCHEMA IF EXISTS {session_schema}")
+                cur.execute(f"DROP SCHEMA IF EXISTS {other_schema}")

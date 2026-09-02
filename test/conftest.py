@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import socket
+import sys
 from contextlib import contextmanager
 from logging import getLogger
 from pathlib import Path
@@ -22,6 +24,36 @@ from . import (
     INTERNAL_SKIP_TAGS,
     running_on_public_ci,
 )
+
+# ``sys._is_gil_enabled`` was added in Python 3.13; on older interpreters there
+# is no notion of a free-threaded build, so any GIL-state-specific test is
+# skipped.
+_HAS_GIL_INTROSPECTION = hasattr(sys, "_is_gil_enabled")
+
+
+@pytest.fixture
+def require_gil_enabled():
+    """Skip unless running on a GIL-enabled interpreter (3.13+ or any <3.13).
+
+    Apply this fixture to tests that assert GIL-build behaviour.
+    """
+    if not _HAS_GIL_INTROSPECTION or not sys._is_gil_enabled():
+        pytest.skip(
+            "requires a GIL-enabled interpreter (e.g. python3.14, not python3.14t)"
+        )
+
+
+@pytest.fixture
+def require_gil_disabled():
+    """Skip unless running on a free-threaded, GIL-disabled interpreter (3.13t+).
+
+    Apply this fixture to tests that only make sense with the GIL disabled.
+    """
+    if not _HAS_GIL_INTROSPECTION or sys._is_gil_enabled():
+        pytest.skip(
+            "requires a free-threaded interpreter with the GIL disabled "
+            "(e.g. `python3.14t` or `python3.14 -X gil=0`)"
+        )
 
 
 class TelemetryCaptureHandler(TelemetryClient):
@@ -155,6 +187,27 @@ def pytest_runtest_setup(item) -> None:
     if "wif" in test_tags:
         if os.getenv("RUN_WIF_TESTS") != "true":
             pytest.skip("Skipping WIF test in current environment")
+
+
+def pytest_unconfigure(config) -> None:
+    """Shut down the pytest-rerunfailures socket server to prevent session hangs.
+
+    The ServerStatusDB.run_server thread blocks forever on socket.accept()
+    with no shutdown mechanism. Closing the socket here unblocks it so the
+    interpreter can exit cleanly instead of deadlocking during teardown.
+    See: https://github.com/pytest-dev/pytest-rerunfailures/issues/295
+    """
+    db = getattr(config, "failures_db", None)
+    sock = getattr(db, "sock", None)
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
 
 
 def get_server_parameter_value(connection, parameter_name: str) -> str | None:

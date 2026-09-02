@@ -430,7 +430,13 @@ S3_MIN_PART_SIZE = 5 * 1024**2
 S3_MAX_PARTS = 10000
 
 S3_CHUNK_SIZE = 8388608  # boto3 default
-AZURE_CHUNK_SIZE = 4 * megabyte
+
+# Azure Block Blob multipart upload limits
+# https://learn.microsoft.com/en-us/rest/api/storageservices/understanding-block-blobs--append-blobs--and-page-blobs
+AZURE_CHUNK_SIZE = 8 * megabyte  # kept consistent with S3_DEFAULT_CHUNK_SIZE
+AZURE_MAX_BLOCKS = 50000
+AZURE_MAX_BLOCK_SIZE = 4000 * megabyte
+AZURE_MAX_OBJECT_SIZE = AZURE_MAX_BLOCKS * AZURE_MAX_BLOCK_SIZE
 
 # https://requests.readthedocs.io/en/latest/user/advanced/#timeouts
 REQUEST_CONNECTION_TIMEOUT = 10
@@ -442,6 +448,7 @@ DAY_IN_SECONDS = 60 * 60 * 24
 ENV_VAR_PARTNER = "SF_PARTNER"
 ENV_VAR_TEST_MODE = "SNOWFLAKE_TEST_MODE"
 ENV_VAR_DISABLE_PLATFORM_DETECTION = "SNOWFLAKE_DISABLE_PLATFORM_DETECTION"
+ENV_VAR_ENABLE_CUSTOM_REVOCATION_ERRORS = "SNOWFLAKE_ENABLE_CUSTOM_REVOCATION_ERRORS"
 
 # Boolean positive values (lowercased) for environment variable checks
 ENV_VAR_BOOL_POSITIVE_VALUES_LOWERCASED = ["true"]

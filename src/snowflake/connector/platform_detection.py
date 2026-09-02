@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from concurrent.futures.thread import ThreadPoolExecutor
@@ -33,6 +34,11 @@ _LOGGERS_TO_SUPPRESS = [
     "urllib3.connectionpool",
 ]
 
+# Guards the process-global logger-level mutation against concurrent connections.
+_suppress_lock = threading.Lock()
+_suppress_depth = 0
+_suppress_saved_levels: dict[str, int] = {}
+
 
 @contextmanager
 def _suppress_platform_detection_logs():
@@ -41,19 +47,33 @@ def _suppress_platform_detection_logs():
 
     This prevents noisy DEBUG logs and stack traces from urllib3 and botocore when detecting
     cloud platforms, which can confuse customers (SNOW-2204396). Our own debug logs are not affected.
+
+    Thread-safe: connections can run concurrently because it mutates process-global logger levels
+    Guard with a lock and a reference count so the original levels are captured once by the
+    first entrant and restored once by the last to exit.
     """
-    original_levels = {}
+    global _suppress_depth
+    with _suppress_lock:
+        if _suppress_depth == 0:
+            # First entrant records the true original levels and applies suppression.
+            _suppress_saved_levels.clear()
+            for logger_name in _LOGGERS_TO_SUPPRESS:
+                lib_logger = logging.getLogger(logger_name)
+                _suppress_saved_levels[logger_name] = lib_logger.level
+                lib_logger.setLevel(
+                    logging.CRITICAL + 1
+                )  # Above CRITICAL = no logs at all
+        _suppress_depth += 1
     try:
-        # Completely suppress all logs from noisy libraries
-        for logger_name in _LOGGERS_TO_SUPPRESS:
-            lib_logger = logging.getLogger(logger_name)
-            original_levels[logger_name] = lib_logger.level
-            lib_logger.setLevel(logging.CRITICAL + 1)  # Above CRITICAL = no logs at all
         yield
     finally:
-        # Restore original log levels
-        for logger_name, level in original_levels.items():
-            logging.getLogger(logger_name).setLevel(level)
+        with _suppress_lock:
+            _suppress_depth -= 1
+            if _suppress_depth == 0:
+                # Last to exit restores the original levels captured by the first entrant.
+                for logger_name, level in _suppress_saved_levels.items():
+                    logging.getLogger(logger_name).setLevel(level)
+                _suppress_saved_levels.clear()
 
 
 class _DetectionState(Enum):
@@ -195,7 +215,7 @@ def is_azure_vm(
     try:
         token_resp = session_manager.get(
             "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
-            headers={"Metadata": "True"},
+            headers={"Metadata": "true"},
             timeout=platform_detection_timeout_seconds,
         )
         return (
@@ -429,6 +449,22 @@ def is_github_action():
     )
 
 
+def is_aws_wif_outbound_token_enabled():
+    """
+    Check if AWS WIF outbound token is enabled via environment variable.
+
+    Returns:
+        _DetectionState: DETECTED if SNOWFLAKE_ENABLE_AWS_WIF_OUTBOUND_TOKEN env var is true,
+                        NOT_DETECTED otherwise.
+    """
+    return (
+        _DetectionState.DETECTED
+        if os.environ.get("SNOWFLAKE_ENABLE_AWS_WIF_OUTBOUND_TOKEN", "false").lower()
+        == "true"
+        else _DetectionState.NOT_DETECTED
+    )
+
+
 @cache
 def detect_platforms(
     platform_detection_timeout_seconds: float | None,
@@ -490,6 +526,7 @@ def detect_platforms(
                 "is_gce_cloud_run_service": is_gcp_cloud_run_service(),
                 "is_gce_cloud_run_job": is_gcp_cloud_run_job(),
                 "is_github_action": is_github_action(),
+                "is_aws_wif_outbound_token_enabled": is_aws_wif_outbound_token_enabled(),
             }
 
             # Run network-calling functions in parallel

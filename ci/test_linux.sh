@@ -2,12 +2,12 @@
 #
 # Test Snowflake Connector in Linux
 # NOTES:
-#   - Versions to be tested should be passed in as the first argument, e.g: "3.9 3.10". If omitted 3.9-3.13 will be assumed.
+#   - Versions to be tested should be passed in as the first argument, e.g: "3.10 3.11". If omitted 3.10-3.14 will be assumed.
 #   - This script assumes that ../dist/repaired_wheels has the wheel(s) built for all versions to be tested
 #   - This is the script that test_docker.sh runs inside of the docker container
 
 
-PYTHON_VERSIONS="${1:-3.9 3.10 3.11 3.12 3.13}"
+PYTHON_VERSIONS="${1:-3.10 3.11 3.12 3.13 3.14 3.14t}"
 THIS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 CONNECTOR_DIR="$( dirname "${THIS_DIR}")"
 
@@ -28,7 +28,13 @@ python3.10 ${THIS_DIR}/change_snowflake_test_pwd.py
 mv ${CONNECTOR_DIR}/test/parameters_jenkins.py ${CONNECTOR_DIR}/test/parameters.py
 
 # Fetch wiremock
-curl https://repo1.maven.org/maven2/org/wiremock/wiremock-standalone/3.11.0/wiremock-standalone-3.11.0.jar --output ${CONNECTOR_DIR}/.wiremock/wiremock-standalone.jar
+WIREMOCK_VERSION=3.11.0
+if [[ -n "$JENKINS_HOME" ]]; then
+    WIREMOCK_BASE_URL=https://artifactory.ci1.us-west-2.aws-dev.app.snowflake.com/artifactory/development-maven-virtual
+else
+    WIREMOCK_BASE_URL=https://repo1.maven.org/maven2
+fi
+curl ${WIREMOCK_BASE_URL}/org/wiremock/wiremock-standalone/${WIREMOCK_VERSION}/wiremock-standalone-${WIREMOCK_VERSION}.jar --output ${CONNECTOR_DIR}/.wiremock/wiremock-standalone.jar
 
 # Run tests
 cd $CONNECTOR_DIR
@@ -40,7 +46,7 @@ else
     for PYTHON_VERSION in ${PYTHON_VERSIONS}; do
         echo "[Info] Testing with ${PYTHON_VERSION}"
         SHORT_VERSION=$(python3.10 -c "print('${PYTHON_VERSION}'.replace('.', ''))")
-        CONNECTOR_WHL=$(ls $CONNECTOR_DIR/dist/snowflake_connector_python*cp${SHORT_VERSION}*manylinux2014*.whl | sort -r | head -n 1)
+        CONNECTOR_WHL=$(ls $CONNECTOR_DIR/dist/snowflake_connector_python*cp${SHORT_VERSION}*manylinux*.whl | sort -r | head -n 1)
         TEST_LIST=`echo py${PYTHON_VERSION/\./}-{unit-parallel,integ,pandas-parallel,sso}-ci | sed 's/ /,/g'`
         TEST_ENVLIST=fix_lint,$TEST_LIST,py${PYTHON_VERSION/\./}-coverage
         echo "[Info] Running tox for ${TEST_ENVLIST}"

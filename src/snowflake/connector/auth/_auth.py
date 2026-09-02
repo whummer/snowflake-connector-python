@@ -51,20 +51,27 @@ from ..errors import (
 from ..network import (
     ACCEPT_TYPE_APPLICATION_SNOWFLAKE,
     CONTENT_TYPE_APPLICATION_JSON,
+    CREDENTIAL_REJECTION_GS_CODES,
     ID_TOKEN_INVALID_LOGIN_REQUEST_GS_CODE,
     OAUTH_ACCESS_TOKEN_EXPIRED_GS_CODE,
+    OAUTH_ACCESS_TOKEN_INVALID_GS_CODE,
     PYTHON_CONNECTOR_USER_AGENT,
     ReauthenticationRequest,
 )
+from ..os_details import get_os_details
 from ..platform_detection import detect_platforms
 from ..session_manager import BaseHttpConfig, HttpConfig
 from ..session_manager import SessionManager as SyncSessionManager
 from ..session_manager import SessionManagerFactory
-from ..sqlstate import SQLSTATE_CONNECTION_WAS_NOT_ESTABLISHED
+from ..sqlstate import (
+    SQLSTATE_AUTHORIZATION_FAILURE,
+    SQLSTATE_CONNECTION_WAS_NOT_ESTABLISHED,
+)
 from ..token_cache import TokenCache, TokenKey, TokenType
+from ..util_text import expand_tilde
 from ..version import VERSION
+from ._oauth_base import AuthByOAuthBase
 from .no_auth import AuthNoAuth
-from .oauth import AuthByOAuth
 
 if TYPE_CHECKING:
     from . import AuthByPlugin
@@ -87,6 +94,7 @@ AUTHENTICATION_REQUEST_KEY_WHITELIST = {
     "CLIENT_ENVIRONMENT",
     "EXT_AUTHN_DUO_METHOD",
     "LOGIN_NAME",
+    "SECONDARY_ROLES",
     "SESSION_PARAMETERS",
     "SVN_REVISION",
 }
@@ -102,8 +110,8 @@ class Auth:
     def _add_spcs_token_to_body(self, body: dict[Any, Any]) -> None:
         """Inject SPCS_TOKEN into the login request body when available.
 
-        This reads the SPCS token from the path specified by SF_SPCS_TOKEN_PATH,
-        or from ``/snowflake/session/spcs_token`` when the env var is unset.
+        The token is read from /snowflake/session/spcs_token when
+        SNOWFLAKE_RUNNING_INSIDE_SPCS is set.
         """
         spcs_token = get_spcs_token()
         if spcs_token is not None:
@@ -159,6 +167,7 @@ class Auth:
                         platform_detection_timeout_seconds=platform_detection_timeout_seconds,
                         session_manager=session_manager.clone(max_retries=0),
                     ),
+                    "OS_DETAILS": get_os_details(),
                     **build_minicore_usage_for_session(),
                 },
             },
@@ -258,6 +267,11 @@ class Auth:
 
         if session_parameters:
             body["data"]["SESSION_PARAMETERS"] = session_parameters
+
+        # Add secondary_roles connection parameter if specified
+        secondary_roles = getattr(self._rest._connection, "_secondary_roles", None)
+        if secondary_roles and isinstance(secondary_roles, str):
+            body["data"]["SECONDARY_ROLES"] = secondary_roles.upper()
 
         logger.debug(
             "body['data']: %s",
@@ -410,11 +424,24 @@ class Auth:
                         sqlstate=SQLSTATE_CONNECTION_WAS_NOT_ESTABLISHED,
                     )
                 )
-            elif (errno == OAUTH_ACCESS_TOKEN_EXPIRED_GS_CODE) and (
-                # SNOW-2329031: OAuth v1.0 does not support token renewal,
-                # for backward compatibility, we do not raise an exception here
-                not isinstance(auth_instance, AuthByOAuth)
-            ):
+            elif (
+                errno
+                in (
+                    OAUTH_ACCESS_TOKEN_EXPIRED_GS_CODE,
+                    OAUTH_ACCESS_TOKEN_INVALID_GS_CODE,
+                )
+            ) and isinstance(auth_instance, AuthByOAuthBase):
+                # A presented OAuth access token was rejected as expired (390318)
+                # or invalid (390303) - both are OAuth-scoped codes in GS.
+                # Reauthenticate (via refresh token or interactive) instead of
+                # hard-failing; reauthenticate() also evicts the stale token from
+                # the cache on terminal failure so it is not replayed.
+                #
+                # The guard is a positive isinstance(AuthByOAuthBase): only OAuth
+                # v2 authenticators (authorization-code, client-credentials) can
+                # renew a token. This excludes OAuth v1.0 (AuthByOAuth), whose
+                # user-supplied token cannot be renewed (SNOW-2329031), and keeps
+                # any non-OAuth authenticator out of the reauth retry.
                 raise ReauthenticationRequest(
                     ProgrammingError(
                         msg=ret["message"],
@@ -451,8 +478,12 @@ class Auth:
                         port=self._rest._port,
                         message=ret["message"],
                     ),
-                    "errno": ER_FAILED_TO_CONNECT_TO_DB,
-                    "sqlstate": SQLSTATE_CONNECTION_WAS_NOT_ESTABLISHED,
+                    "errno": int(errno),
+                    "sqlstate": (
+                        SQLSTATE_AUTHORIZATION_FAILURE
+                        if str(errno) in CREDENTIAL_REJECTION_GS_CODES
+                        else SQLSTATE_CONNECTION_WAS_NOT_ESTABLISHED
+                    ),
                 },
             )
         else:
@@ -633,14 +664,16 @@ def get_token_from_private_key(
     from . import AuthByKeyPair
 
     auth_instance = AuthByKeyPair(
-        private_key,
-        DAY_IN_SECONDS,
+        private_key=private_key,
+        lifetime_in_seconds=DAY_IN_SECONDS,
     )  # token valid for 24 hours
     return auth_instance.prepare(account=account, user=user)
 
 
 def get_public_key_fingerprint(private_key_file: str, password: str) -> str:
     """Helper function to generate the public key fingerprint from the private key file"""
+    private_key_file = expand_tilde(private_key_file)
+
     with open(private_key_file, "rb") as key:
         p_key = load_pem_private_key(
             key.read(), password=password.encode(), backend=default_backend()

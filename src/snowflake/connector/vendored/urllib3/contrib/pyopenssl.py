@@ -6,9 +6,9 @@ support for Python 2.7 all relevant Python versions support SNI so
 
 This needs the following packages installed:
 
-* `pyOpenSSL`_ (tested with 16.0.0)
-* `cryptography`_ (minimum 1.3.4, from pyopenssl)
-* `idna`_ (minimum 2.0)
+* `pyOpenSSL`_ (tested with 19.0.0)
+* `cryptography`_ (minimum 2.3, from pyopenssl)
+* `idna`_ (minimum 2.1, from cryptography)
 
 However, pyOpenSSL depends on cryptography, so while we use all three directly here we
 end up having relatively few packages required.
@@ -40,7 +40,7 @@ like this:
 
 from __future__ import annotations
 
-import OpenSSL.SSL  # type: ignore[import-untyped]
+import OpenSSL.SSL  # type: ignore[import-not-found]
 from cryptography import x509
 
 try:
@@ -56,12 +56,11 @@ import ssl
 import typing
 from io import BytesIO
 from socket import socket as socket_cls
-from socket import timeout
 
 from .. import util
 
 if typing.TYPE_CHECKING:
-    from OpenSSL.crypto import X509  # type: ignore[import-untyped]
+    from OpenSSL.crypto import X509  # type: ignore[import-not-found]
 
 
 __all__ = ["inject_into_urllib3", "extract_from_urllib3"]
@@ -198,20 +197,36 @@ def _dnsname_to_stdlib(name: str) -> str | None:
 
     def idna_encode(name: str) -> bytes | None:
         """
-        Borrowed wholesale from the Python Cryptography Project. It turns out
+        Based on the Python Cryptography Project implementation. It turns out
         that we can't just safely call `idna.encode`: it can explode for
-        wildcard names. This avoids that problem.
+        wildcard names. This avoids that problem and preserves Snowflake's
+        ASCII account-locator underscores.
         """
         import idna
 
+        prefix = ""
+        for candidate in ["*.", "."]:
+            if name.startswith(candidate):
+                prefix = candidate
+                name = name[len(candidate) :]
+                break
+
         try:
-            for prefix in ["*.", "."]:
-                if name.startswith(prefix):
-                    name = name[len(prefix) :]
-                    return prefix.encode("ascii") + idna.encode(name)
-            return idna.encode(name)
+            return prefix.encode("ascii") + idna.encode(name)
         except idna.core.IDNAError:
-            return None
+            # Snowflake account locators may contain underscores. Although an
+            # underscore is not valid IDNA, these ASCII names are valid DNS
+            # labels and can appear verbatim in both the requested hostname and
+            # its certificate SAN. Retain the name only when replacing the
+            # underscores makes the otherwise-unchanged name valid IDNA; this
+            # keeps rejecting names with any additional IDNA violation.
+            if not name.isascii() or "_" not in name:
+                return None
+            try:
+                idna.encode(name.replace("_", "a"))
+            except idna.core.IDNAError:
+                return None
+            return prefix.encode("ascii") + name.encode("ascii")
 
     # Don't send IPv6 addresses through the IDNA encoder.
     if ":" in name:
@@ -311,7 +326,7 @@ class WrappedSocket:
                 raise
         except OpenSSL.SSL.WantReadError as e:
             if not util.wait_for_read(self.socket, self.socket.gettimeout()):
-                raise timeout("The read operation timed out") from e
+                raise TimeoutError("The read operation timed out") from e
             else:
                 return self.recv(*args, **kwargs)
 
@@ -336,7 +351,7 @@ class WrappedSocket:
                 raise
         except OpenSSL.SSL.WantReadError as e:
             if not util.wait_for_read(self.socket, self.socket.gettimeout()):
-                raise timeout("The read operation timed out") from e
+                raise TimeoutError("The read operation timed out") from e
             else:
                 return self.recv_into(*args, **kwargs)
 
@@ -353,7 +368,7 @@ class WrappedSocket:
                 return self.connection.send(data)  # type: ignore[no-any-return]
             except OpenSSL.SSL.WantWriteError as e:
                 if not util.wait_for_write(self.socket, self.socket.gettimeout()):
-                    raise timeout() from e
+                    raise TimeoutError() from e
                 continue
             except OpenSSL.SSL.SysCallError as e:
                 raise OSError(e.args[0], str(e)) from e
@@ -520,7 +535,7 @@ class PyOpenSSLContext:
                 cnx.do_handshake()
             except OpenSSL.SSL.WantReadError as e:
                 if not util.wait_for_read(sock, sock.gettimeout()):
-                    raise timeout("select timed out") from e
+                    raise TimeoutError("select timed out") from e
                 continue
             except OpenSSL.SSL.Error as e:
                 raise ssl.SSLError(f"bad handshake: {e!r}") from e
