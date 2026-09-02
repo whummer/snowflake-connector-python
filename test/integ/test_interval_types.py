@@ -81,6 +81,8 @@ def test_select_year_month_interval_subtypes(
         assert result == expected
 
 
+# note whummer: unable to run `feature_interval_types=enabled` against our Snowflake instance for snapshot testing
+@pytest.mark.skip(reason="`feature_interval_types` not available in public Snowflake")
 @pytest.mark.parametrize("use_numpy", [True, False])
 @pytest.mark.parametrize("result_format", ["json", "arrow"])
 def test_select_day_time_interval(conn_cnx, use_numpy, result_format):
